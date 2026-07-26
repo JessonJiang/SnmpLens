@@ -205,3 +205,26 @@ jobs:
             artifacts/SnmpLens-linux-amd64
             artifacts/SnmpLens-checksums.txt
             artifacts/SnmpLens-checksums.txt.sig
+
+  # Auto-submit the updated manifest to microsoft/winget-pkgs after the release
+  # assets are published. Enable once the package's first manifest has been
+  # merged: set repo variable WINGET_ENABLED=true and secret WINGET_TOKEN
+  # (a classic PAT with public_repo scope). Until then this job is skipped.
+  winget:
+    needs: release
+    if: ${{ vars.WINGET_ENABLED == 'true' }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Submit updated manifest to winget-pkgs
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $installer = "https://github.com/${{ github.repository }}/releases/download/$tag/SnmpLens-windows-amd64-setup.exe"
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update Wasabules.SnmpLens `
+            --version $version `
+            --urls "$installer" `
+            --submit `
+            --token "${{ secrets.WINGET_TOKEN }}"
