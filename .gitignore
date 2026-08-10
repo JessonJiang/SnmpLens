@@ -29,8 +29,9 @@ Thumbs.db
 mib_tree_debug.json
 *.log
 
-# Claude Code local settings
-.claude/
+# Claude Code local settings (personal), but keep shared skills tracked
+.claude/*
+!.claude/skills/
 
 # Test scripts with credentials
 test_snmpv3.py
