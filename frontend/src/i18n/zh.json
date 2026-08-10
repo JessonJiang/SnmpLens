@@ -36,6 +36,8 @@
   },
 
   "common": {
+    "previous": "上一页",
+    "next": "下一页",
     "save": "保存",
     "cancel": "取消",
     "close": "关闭",
@@ -172,6 +174,8 @@
   },
 
   "recentHistory": {
+    "viewAll": "查看历史",
+    "clickToView": "点击在历史记录标签中打开此条目",
     "title": "最近历史",
     "recent": "最近 {count} 条",
     "empty": "暂无历史记录。执行操作后将在此显示。",
@@ -259,6 +263,29 @@
   },
 
   "history": {
+    "badgeError": "失败",
+    "badgeNoResult": "无结果",
+    "sortBy": "排序：",
+    "sortDate": "日期",
+    "sortType": "类型",
+    "sortTarget": "目标",
+    "sortDuration": "耗时",
+    "sortStatus": "状态",
+    "selectMode": "选择",
+    "exitSelect": "完成",
+    "selectedCount": "{count, plural, other {已选 #}}",
+    "selectAll": "全选",
+    "clearSelection": "清除",
+    "deleteSelected": "删除",
+    "exportSelected": "导出",
+    "deletedCount": "{count, plural, other {已删除 # 条}}",
+    "exportScope": "范围：",
+    "scopeAll": "全部",
+    "scopeFiltered": "已筛选",
+    "scopeSelected": "所选",
+    "exportFormat": "格式：",
+    "diffHint": "选择两个条目（先 A 后 B），然后点击比较。",
+    "resultCount": "{count} 个结果",
     "title": "SNMP 历史记录（{count} 条）",
     "diffMode": "Diff 模式",
     "exitDiff": "退出 Diff",

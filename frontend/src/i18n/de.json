@@ -36,6 +36,8 @@
   },
 
   "common": {
+    "previous": "Zurück",
+    "next": "Weiter",
     "save": "Speichern",
     "cancel": "Abbrechen",
     "close": "Schließen",
@@ -172,6 +174,8 @@
   },
 
   "recentHistory": {
+    "viewAll": "Verlauf ansehen",
+    "clickToView": "Klicken, um diesen Eintrag im Verlauf zu öffnen",
     "title": "Letzter Verlauf",
     "recent": "{count} kürzlich",
     "empty": "Noch kein Verlauf. Führen Sie Operationen aus, um sie hier zu sehen.",
@@ -259,6 +263,29 @@
   },
 
   "history": {
+    "badgeError": "Fehler",
+    "badgeNoResult": "Kein Ergebnis",
+    "sortBy": "Sortieren:",
+    "sortDate": "Datum",
+    "sortType": "Typ",
+    "sortTarget": "Ziel",
+    "sortDuration": "Dauer",
+    "sortStatus": "Status",
+    "selectMode": "Auswählen",
+    "exitSelect": "Fertig",
+    "selectedCount": "{count, plural, one {# ausgewählt} other {# ausgewählt}}",
+    "selectAll": "Alle auswählen",
+    "clearSelection": "Leeren",
+    "deleteSelected": "Löschen",
+    "exportSelected": "Exportieren",
+    "deletedCount": "{count, plural, one {# Eintrag gelöscht} other {# Einträge gelöscht}}",
+    "exportScope": "Umfang:",
+    "scopeAll": "Alle",
+    "scopeFiltered": "Gefiltert",
+    "scopeSelected": "Auswahl",
+    "exportFormat": "Format:",
+    "diffHint": "Wählen Sie zwei Einträge (A dann B) und klicken Sie auf Vergleichen.",
+    "resultCount": "{count, plural, one {# Ergebnis} other {# Ergebnisse}}",
     "title": "SNMP-Verlauf ({count} Einträge)",
     "diffMode": "Diff-Modus",
     "exitDiff": "Diff beenden",

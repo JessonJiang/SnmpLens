@@ -36,6 +36,8 @@
   },
 
   "common": {
+    "previous": "Previous",
+    "next": "Next",
     "save": "Save",
     "cancel": "Cancel",
     "close": "Close",
@@ -172,6 +174,8 @@
   },
 
   "recentHistory": {
+    "viewAll": "View history",
+    "clickToView": "Click to open this entry in the History tab",
     "title": "Recent History",
     "recent": "{count} recent",
     "empty": "No history yet. Execute operations to see them here.",
@@ -259,6 +263,29 @@
   },
 
   "history": {
+    "badgeError": "Error",
+    "badgeNoResult": "No result",
+    "sortBy": "Sort:",
+    "sortDate": "Date",
+    "sortType": "Type",
+    "sortTarget": "Target",
+    "sortDuration": "Duration",
+    "sortStatus": "Status",
+    "selectMode": "Select",
+    "exitSelect": "Done",
+    "selectedCount": "{count, plural, one {# selected} other {# selected}}",
+    "selectAll": "Select all",
+    "clearSelection": "Clear",
+    "deleteSelected": "Delete",
+    "exportSelected": "Export",
+    "deletedCount": "{count, plural, one {# entry deleted} other {# entries deleted}}",
+    "exportScope": "Scope:",
+    "scopeAll": "All",
+    "scopeFiltered": "Filtered",
+    "scopeSelected": "Selected",
+    "exportFormat": "Format:",
+    "diffHint": "Select two entries (A then B), then click Compare.",
+    "resultCount": "{count, plural, one {# result} other {# results}}",
     "title": "SNMP History ({count} entries)",
     "diffMode": "Diff Mode",
     "exitDiff": "Exit Diff",

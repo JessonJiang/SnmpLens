@@ -36,6 +36,8 @@
   },
 
   "common": {
+    "previous": "Anterior",
+    "next": "Siguiente",
     "save": "Guardar",
     "cancel": "Cancelar",
     "close": "Cerrar",
@@ -172,6 +174,8 @@
   },
 
   "recentHistory": {
+    "viewAll": "Ver historial",
+    "clickToView": "Haga clic para abrir esta entrada en la pestaña Historial",
     "title": "Historial reciente",
     "recent": "{count} recientes",
     "empty": "Sin historial aún. Ejecute operaciones para verlas aquí.",
@@ -259,6 +263,29 @@
   },
 
   "history": {
+    "badgeError": "Error",
+    "badgeNoResult": "Sin resultado",
+    "sortBy": "Ordenar:",
+    "sortDate": "Fecha",
+    "sortType": "Tipo",
+    "sortTarget": "Destino",
+    "sortDuration": "Duración",
+    "sortStatus": "Estado",
+    "selectMode": "Seleccionar",
+    "exitSelect": "Hecho",
+    "selectedCount": "{count, plural, one {# seleccionado} other {# seleccionados}}",
+    "selectAll": "Seleccionar todo",
+    "clearSelection": "Limpiar",
+    "deleteSelected": "Eliminar",
+    "exportSelected": "Exportar",
+    "deletedCount": "{count, plural, one {# entrada eliminada} other {# entradas eliminadas}}",
+    "exportScope": "Alcance:",
+    "scopeAll": "Todo",
+    "scopeFiltered": "Filtrado",
+    "scopeSelected": "Selección",
+    "exportFormat": "Formato:",
+    "diffHint": "Seleccione dos entradas (A y luego B), luego haga clic en Comparar.",
+    "resultCount": "{count, plural, one {# resultado} other {# resultados}}",
     "title": "Historial SNMP ({count} entradas)",
     "diffMode": "Modo Diff",
     "exitDiff": "Salir de Diff",

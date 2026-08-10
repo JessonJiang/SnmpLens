@@ -1,15 +1,27 @@
 <script>
+  import { tick, createEventDispatcher } from 'svelte';
   import { _ } from 'svelte-i18n';
+
+  const dispatch = createEventDispatcher();
   import { get } from 'svelte/store';
   import { historyStore } from './stores/historyStore';
   import { notificationStore } from './stores/notifications';
   import { mibStore } from './stores/mibStore';
   import DiffModal from './DiffModal.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import HistoryExportModal from './history/HistoryExportModal.svelte';
+  import HistoryEntry from './history/HistoryEntry.svelte';
   import Icon from './Icon.svelte';
+  import { ResolveOids } from '../wailsjs/go/main/App';
   import { findNodeByOid, findMibNameByOid, formatValueWithEnum } from './utils/mibTree';
-  import { formatTimestamp, formatDuration } from './utils/formatting';
   import { anonMode, anonymizeIp } from './utils/anonymize';
-  import { copyToClipboard } from './utils/clipboard';
+
+  // Entry to reveal (expand + scroll to) when opened from Recent history.
+  export let highlightId = null;
+
+  const PAGE_SIZE = 20;
+  let currentPage = 1;
+  let flashId = null; // entry currently flashing (local, so it doesn't persist across remounts)
 
   let searchTerm = '';
   let operationFilter = 'all'; // 'all', 'GET', 'SET', 'WALK'
@@ -23,31 +35,71 @@
   let diffSelectionB = null;
   let showDiffModal = false;
 
+  // Sorting (clickable sort bar). Default: newest first.
+  let sortKey = 'timestamp'; // 'timestamp' | 'operation' | 'target' | 'duration' | 'status'
+  let sortAsc = false;       // false = descending (newest / largest first)
+
+  const SORT_FIELDS = [
+    { key: 'timestamp', labelKey: 'history.sortDate' },
+    { key: 'operation', labelKey: 'history.sortType' },
+    { key: 'target', labelKey: 'history.sortTarget' },
+    { key: 'duration', labelKey: 'history.sortDuration' },
+    { key: 'status', labelKey: 'history.sortStatus' },
+  ];
+
+  // Multi-selection (bulk delete / export).
+  let selectMode = false;
+  let selectedIds = new Set();
+
+  // Export options (scope + format), used by the export modal.
+  let exportScope = 'all';   // 'all' | 'filtered' | 'selected'
+  let exportFormat = 'json'; // 'json' | 'csv'
+
+  // Pagination over the filtered history.
+  $: totalPages = Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE));
+  $: pagedHistory = filteredHistory.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  $: if (currentPage > totalPages) currentPage = totalPages;
+
+  // Reveal the highlighted entry: jump to its page, expand it and scroll to it.
+  // Depends on filteredHistory too, so if the request arrives before history has
+  // finished loading, it retries once the list populates.
+  $: if (highlightId != null && filteredHistory.length > 0) revealEntry(highlightId);
+
+  async function revealEntry(id) {
+    const idx = filteredHistory.findIndex(e => e.id === id);
+    // Entry not present yet (still loading, or filtered out): bail WITHOUT
+    // clearing the highlight, so the reactive statement can retry.
+    if (idx < 0) return;
+    currentPage = Math.floor(idx / PAGE_SIZE) + 1;
+    expandedIds = new Set(expandedIds).add(id);
+    resolveEntryOidsById(id);
+    flashId = id;
+    setTimeout(() => { if (flashId === id) flashId = null; }, 2400);
+    await tick();
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(id)) : String(id);
+    const el = document.querySelector(`[data-entry-id="${esc}"]`);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // One-shot: tell the parent to clear the highlight so it isn't re-applied
+    // (and re-expanded) every time this panel remounts on tab switch.
+    dispatch('highlightApplied');
+  }
+
   // Get display name (MIB name or OID)
   function getDisplayName(oid) {
     const mibName = findMibNameByOid(oid, $mibStore.tree);
     return mibName || oid;
   }
 
-  // Get value from entry results
-  function getDisplayValue(entry) {
-    if (!entry.results || entry.results.length === 0) return null;
-
-    if (entry.operation === 'GET' || entry.operation === 'SET') {
-      const firstResult = entry.results[0];
-      if (firstResult?.result?.value !== undefined) {
-        const val = firstResult.result.value;
-        const node = findNodeByOid(entry.oid, $mibStore.tree);
-        return formatValueWithEnum(val, node);
-      }
+  function countEntryResults(entry) {
+    let n = 0;
+    for (const res of entry.results || []) {
+      if (res.error) continue;
+      if (Array.isArray(res.result?.value)) n += res.result.value.length;
+      else if (res.result) n += 1;
     }
-
-    if ((entry.operation === 'WALK' || entry.operation === 'GETBULK') && entry.totalResults) {
-      return `${entry.totalResults} results`;
-    }
-
-    return null;
+    return n;
   }
+
 
   // Reactive filtering
   $: {
@@ -74,13 +126,42 @@
         return (
           entry.oid?.toLowerCase().includes(lowerSearch) ||
           entry.targets?.some(t => t.toLowerCase().includes(lowerSearch)) ||
-          entry.operation.toLowerCase().includes(lowerSearch) ||
+          entry.operation?.toLowerCase().includes(lowerSearch) ||
           entry.error?.toLowerCase().includes(lowerSearch)
         );
       });
     }
     
-    filteredHistory = history;
+    // Sort (sortKey/sortAsc referenced here so Svelte re-runs on change).
+    const dir = sortAsc ? 1 : -1;
+    filteredHistory = [...history].sort((a, b) => dir * compareEntries(a, b, sortKey));
+  }
+
+  // Compare two entries by the given key (used for sorting).
+  function compareEntries(a, b, key) {
+    switch (key) {
+      case 'operation':
+        return (a.operation || '').localeCompare(b.operation || '');
+      case 'target':
+        return (a.targets?.[0] || '').localeCompare(b.targets?.[0] || '');
+      case 'duration':
+        return (a.duration || 0) - (b.duration || 0);
+      case 'status':
+        return (a.success === b.success) ? 0 : (a.success ? 1 : -1);
+      case 'timestamp':
+      default:
+        return String(a.timestamp).localeCompare(String(b.timestamp));
+    }
+  }
+
+  function toggleSort(key) {
+    if (sortKey === key) {
+      sortAsc = !sortAsc;
+    } else {
+      sortKey = key;
+      // Date defaults to newest-first; the rest to ascending.
+      sortAsc = key !== 'timestamp';
+    }
   }
 
   function toggleExpand(id) {
@@ -88,27 +169,49 @@
       expandedIds.delete(id);
     } else {
       expandedIds.add(id);
+      resolveEntryOidsById(id);
     }
     expandedIds = expandedIds; // Trigger reactivity
   }
 
-  function handleClearHistory() {
-    const t = get(_);
-    if (confirm(t('history.clearConfirm'))) {
-      historyStore.clear();
-      notificationStore.add(t('history.cleared'), 'success');
+  // OID name/syntax/enum cache for the ResultsDisplay shown in expanded entries,
+  // resolved lazily (the cache from when the request ran isn't persisted).
+  let historyOidCache = {};
+
+  async function resolveEntryOidsById(id) {
+    const entry = $historyStore.find(e => e.id === id);
+    if (!entry) return;
+    const oids = new Set();
+    if (entry.oid) oids.add(entry.oid);
+    (entry.results || []).forEach(res => {
+      if (Array.isArray(res.result?.value)) {
+        res.result.value.forEach(item => item?.oid && oids.add(item.oid));
+      } else if (res.result?.oid) {
+        oids.add(res.result.oid);
+      }
+    });
+    const toResolve = [...oids].filter(o => !(o in historyOidCache));
+    if (!toResolve.length) return;
+    try {
+      const resolved = await ResolveOids(toResolve);
+      historyOidCache = { ...historyOidCache, ...resolved };
+    } catch (e) {
+      /* names just won't resolve */
     }
+  }
+
+  let showClearConfirm = false;
+
+  function confirmClearHistory() {
+    historyStore.clear();
+    notificationStore.add(get(_)('history.cleared'), 'success');
+    showClearConfirm = false;
   }
 
   function handleDeleteEntry(id) {
     const t = get(_);
     historyStore.remove(id);
     notificationStore.add(t('history.entryRemoved'), 'success');
-  }
-
-  function handleExport() {
-    exportData = historyStore.export();
-    showExportModal = true;
   }
 
   function handleCopyExport() {
@@ -123,30 +226,17 @@
 
   function handleDownloadExport() {
     const t = get(_);
-    const blob = new Blob([exportData], { type: 'application/json' });
+    const ext = exportFormat === 'csv' ? 'csv' : 'json';
+    const mime = exportFormat === 'csv' ? 'text/csv;charset=utf-8' : 'application/json';
+    const blob = new Blob([exportData], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `snmp-history-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `snmp-history-${new Date().toISOString().split('T')[0]}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
     notificationStore.add(t('history.downloaded'), 'success');
     showExportModal = false;
-  }
-
-  function getOperationIcon(operation) {
-    switch (operation) {
-      case 'GET': return 'download';
-      case 'SET': return 'upload';
-      case 'GETNEXT': return 'arrow-right-to-line';
-      case 'GETBULK': return 'layers';
-      case 'WALK': return 'footprints';
-      default: return 'file';
-    }
-  }
-
-  function getStatusColor(success) {
-    return success ? 'var(--success-color)' : 'var(--error-color)';
   }
 
   // Diff mode functions
@@ -177,10 +267,123 @@
     }
   }
 
+  function enterDiffMode() {
+    diffMode = true;
+    // Diff and multi-select are mutually exclusive.
+    selectMode = false;
+    selectedIds = new Set();
+  }
+
   function exitDiffMode() {
     diffMode = false;
     diffSelectionA = null;
     diffSelectionB = null;
+  }
+
+  // --- Multi-selection ---
+  function enterSelectMode() {
+    selectMode = true;
+    exitDiffMode();
+  }
+
+  function exitSelectMode() {
+    selectMode = false;
+    selectedIds = new Set();
+  }
+
+  function toggleSelect(id) {
+    if (selectedIds.has(id)) selectedIds.delete(id);
+    else selectedIds.add(id);
+    selectedIds = selectedIds; // trigger reactivity
+  }
+
+  function selectAllFiltered() {
+    selectedIds = new Set(filteredHistory.map((e) => e.id));
+  }
+
+  function clearSelection() {
+    selectedIds = new Set();
+  }
+
+  function deleteSelected() {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    historyStore.removeMany(ids);
+    notificationStore.add(get(_)('history.deletedCount', { values: { count: ids.length } }), 'success');
+    selectedIds = new Set();
+  }
+
+  // --- Export (scope + format) ---
+  // Pure builder so the reactive statement below re-runs on any dep change.
+  function entriesForScope(scope, all, filtered, selIds) {
+    if (scope === 'selected') return all.filter((e) => selIds.has(e.id));
+    if (scope === 'filtered') return filtered;
+    return all;
+  }
+
+  function exportValueCell(entry) {
+    if (entry.error) return '';
+    if (entry.operation === 'GET' || entry.operation === 'SET' || entry.operation === 'GETNEXT') {
+      const val = entry.results?.[0]?.result?.value;
+      if (val !== undefined && !Array.isArray(val)) {
+        const node = findNodeByOid(entry.oid, $mibStore.tree);
+        return formatValueWithEnum(val, node);
+      }
+    }
+    const count = entry.totalResults ?? countEntryResults(entry);
+    return count > 0 ? String(count) : '';
+  }
+
+  function csvCell(v) {
+    let s = String(v ?? '');
+    // Neutralize spreadsheet formula injection: a leading =, +, -, @ (or a
+    // control char) makes Excel/LibreOffice treat device-supplied text as a
+    // formula. Prefix with an apostrophe to force a literal string.
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return /[",\r\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  function toCsv(entries) {
+    const header = ['timestamp', 'operation', 'targets', 'oid', 'name', 'value', 'version', 'durationMs', 'success', 'error'];
+    const lines = entries.map((e) => [
+      e.timestamp,
+      e.operation,
+      (e.targets || []).join('; '),
+      e.oid || '',
+      getDisplayName(e.oid),
+      exportValueCell(e),
+      e.version || '',
+      e.duration ?? '',
+      e.success ? 'true' : 'false',
+      e.error || '',
+    ].map(csvCell).join(','));
+    return [header.join(','), ...lines].join('\r\n');
+  }
+
+  // Apply Anonymous Mode masking to an entry's targets (top-level and inside
+  // per-result rows) so exports never leak real IPs the UI is hiding.
+  function anonymizeEntry(e) {
+    const out = { ...e, targets: (e.targets || []).map(anonymizeIp) };
+    if (Array.isArray(e.results)) {
+      out.results = e.results.map((r) => (r && r.target ? { ...r, target: anonymizeIp(r.target) } : r));
+    }
+    return out;
+  }
+
+  function buildExportData(scope, format, all, filtered, selIds, anon) {
+    let entries = entriesForScope(scope, all, filtered, selIds);
+    if (anon) entries = entries.map(anonymizeEntry);
+    return format === 'csv' ? toCsv(entries) : historyStore.export(entries);
+  }
+
+  // Recompute the export payload whenever the modal is open and its inputs change.
+  $: if (showExportModal) {
+    exportData = buildExportData(exportScope, exportFormat, $historyStore, filteredHistory, selectedIds, $anonMode);
+  }
+
+  function openExport(scope) {
+    exportScope = scope;
+    showExportModal = true;
   }
 </script>
 
@@ -188,20 +391,42 @@
   <div class="header">
     <h3>{$_('history.title', { values: { count: $historyStore.length } })}</h3>
     <div class="header-actions">
-      <button class="btn tertiary" class:active-diff={diffMode} on:click={() => diffMode ? exitDiffMode() : (diffMode = true)}>
+      <button class="btn tertiary" class:active-diff={selectMode} on:click={() => selectMode ? exitSelectMode() : enterSelectMode()}>
+        <Icon name="check-square" size={14} /> {selectMode ? $_('history.exitSelect') : $_('history.selectMode')}
+      </button>
+      <button class="btn tertiary" class:active-diff={diffMode} on:click={() => diffMode ? exitDiffMode() : enterDiffMode()}>
         {diffMode ? $_('history.exitDiff') : $_('history.diffMode')}
       </button>
       {#if diffMode && diffSelectionA && diffSelectionB}
         <button class="btn" on:click={openDiff}>{$_('history.compare')}</button>
       {/if}
-      <button class="btn tertiary" on:click={handleExport}>
+      <button class="btn tertiary" on:click={() => openExport('all')}>
         {$_('common.export')}
       </button>
-      <button class="btn danger" on:click={handleClearHistory}>
+      <button class="btn danger" on:click={() => showClearConfirm = true}>
         {$_('history.clearAll')}
       </button>
     </div>
   </div>
+
+  {#if diffMode}
+    <p class="diff-hint"><Icon name="square" size={13} /> {$_('history.diffHint')}</p>
+  {/if}
+
+  {#if selectMode}
+    <div class="bulk-bar">
+      <span class="bulk-count">{$_('history.selectedCount', { values: { count: selectedIds.size } })}</span>
+      <button class="btn-link" on:click={selectAllFiltered}>{$_('history.selectAll')}</button>
+      <button class="btn-link" on:click={clearSelection} disabled={selectedIds.size === 0}>{$_('history.clearSelection')}</button>
+      <div class="bulk-spacer"></div>
+      <button class="btn tertiary" on:click={() => openExport('selected')} disabled={selectedIds.size === 0}>
+        <Icon name="download" size={14} /> {$_('history.exportSelected')}
+      </button>
+      <button class="btn danger" on:click={deleteSelected} disabled={selectedIds.size === 0}>
+        <Icon name="trash-2" size={14} /> {$_('history.deleteSelected')}
+      </button>
+    </div>
+  {/if}
 
   <div class="filters">
     <div class="filter-group">
@@ -237,9 +462,25 @@
     </div>
   </div>
 
+  <div class="sort-bar">
+    <span class="sort-label">{$_('history.sortBy')}</span>
+    {#each SORT_FIELDS as field}
+      <button
+        class="sort-btn"
+        class:active={sortKey === field.key}
+        on:click={() => toggleSort(field.key)}
+      >
+        {$_(field.labelKey)}
+        {#if sortKey === field.key}
+          <Icon name={sortAsc ? 'chevron-up' : 'chevron-down'} size={13} />
+        {/if}
+      </button>
+    {/each}
+  </div>
+
   <div class="history-container">
     {#if filteredHistory.length === 0}
-      <p class="no-history">
+      <p class="empty-state">
         {#if searchTerm || operationFilter !== 'all' || statusFilter !== 'all'}
           {$_('history.noMatchFilter')}
         {:else}
@@ -247,125 +488,67 @@
         {/if}
       </p>
     {:else}
-      {#each filteredHistory as entry (entry.id)}
-        <div class="history-entry" class:expanded={expandedIds.has(entry.id)} class:diff-selected={diffMode && isDiffSelected(entry)}>
-          <div class="entry-header" on:click={() => diffMode ? toggleDiffSelection(entry) : toggleExpand(entry.id)} on:keydown={(e) => e.key === 'Enter' && (diffMode ? toggleDiffSelection(entry) : toggleExpand(entry.id))} role="button" tabindex="0">
-            {#if diffMode}
-              <span class="diff-checkbox" class:disabled={!isDiffEligible(entry)}>
-                {#if isDiffSelected(entry)}
-                  {diffSelectionA?.id === entry.id ? 'A' : 'B'}
-                {:else if isDiffEligible(entry)}
-                  [ ]
-                {:else}
-                  -
-                {/if}
-              </span>
-            {/if}
-            <span class="chevron">{expandedIds.has(entry.id) ? '▼' : '▶'}</span>
-            <span class="operation-icon"><Icon name={getOperationIcon(entry.operation)} size={14} /></span>
-            <span class="operation-type">{entry.operation}</span>
-            <span class="timestamp">{formatTimestamp(entry.timestamp)}</span>
-            <span class="mib-name" title={entry.oid}>{getDisplayName(entry.oid)}</span>
-            <button class="btn-copy-small" on:click|stopPropagation={() => copyToClipboard(entry.oid, $_('common.oid'))} title={$_('common.oid')}><Icon name="copy" size={13} /></button>
-            {#if getDisplayValue(entry)}
-              <span class="value-display" title={getDisplayValue(entry)}>→ {getDisplayValue(entry)}</span>
-            {/if}
-            <span class="targets-count">{entry.targets?.length || 0} target(s)</span>
-            <span class="duration">{formatDuration(entry.duration)}</span>
-            <span class="status" style="color: {getStatusColor(entry.success)}">
-              {#if entry.success}<Icon name="check" size={15} />{:else}<Icon name="x" size={15} />{/if}
-            </span>
-            <button 
-              class="btn-icon delete-btn" 
-              on:click|stopPropagation={() => handleDeleteEntry(entry.id)}
-              title={$_('history.deleteEntry')}
-            >
-              <Icon name="trash-2" size={15} />
-            </button>
-          </div>
-          
-          {#if expandedIds.has(entry.id)}
-            <div class="entry-details">
-              <div class="detail-row">
-                <strong>{$_('nodeDetails.name')}</strong> <code class="mib-name-detail">{getDisplayName(entry.oid)}</code>
-              </div>
-              <div class="detail-row">
-                <strong>{$_('nodeDetails.oid')}</strong> <code>{entry.oid}</code>
-                <button class="btn-copy-small" on:click={() => copyToClipboard(entry.oid, $_('common.oid'))} title={$_('common.oid')}><Icon name="copy" size={13} /></button>
-              </div>
-              <div class="detail-row">
-                <strong>{$_('history.targets')}:</strong> <code>{$anonMode ? entry.targets?.map(t => anonymizeIp(t)).join(', ') : entry.targets?.join(', ')}</code>
-              </div>
-              <div class="detail-row">
-                <strong>{$_('common.version')}:</strong> <span>{entry.version}</span>
-              </div>
-
-              {#if entry.operation === 'SET'}
-                <div class="detail-row">
-                  <strong>{$_('common.value')}:</strong> <code>{entry.value}</code>
-                  <button class="btn-copy-small" on:click={() => copyToClipboard(String(entry.value), $_('common.value'))} title={$_('common.value')}><Icon name="copy" size={13} /></button>
-                </div>
-                <div class="detail-row">
-                  <strong>{$_('common.type')}:</strong> <span>{entry.valueType}</span>
-                </div>
-              {/if}
-
-              {#if entry.operation === 'WALK' && entry.totalResults}
-                <div class="detail-row">
-                  <strong>{$_('common.results')}:</strong> <span>{entry.totalResults}</span>
-                </div>
-              {/if}
-
-              {#if entry.error}
-                <div class="detail-row error-row">
-                  <strong>{$_('history.error')}:</strong> <span>{entry.error}</span>
-                </div>
-              {/if}
-
-              {#if entry.results && entry.results.length > 0}
-                <div class="results-summary">
-                  <strong>{$_('common.results')}:</strong>
-                  {#each entry.results as result}
-                    <div class="result-item" class:has-error={result.error}>
-                      <div><strong>{$anonMode ? anonymizeIp(result.target) : result.target}</strong></div>
-                      {#if result.error}
-                        <div class="error-text">{result.error}</div>
-                      {:else if result.result?.type === 'WalkResponse'}
-                        <div>{result.result.value?.length || 0} items</div>
-                      {:else if result.result}
-                        <div>
-                          {result.result.type}: {JSON.stringify(result.result.value)}
-                          <button class="btn-copy-small" on:click={() => copyToClipboard(JSON.stringify(result.result.value), $_('common.value'))} title={$_('common.value')}><Icon name="copy" size={13} /></button>
-                        </div>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
+      {#each pagedHistory as entry (entry.id)}
+        <HistoryEntry
+          {entry}
+          expanded={expandedIds.has(entry.id)}
+          {selectMode}
+          {diffMode}
+          selected={selectedIds.has(entry.id)}
+          diffLabel={diffSelectionA?.id === entry.id ? 'A' : (diffSelectionB?.id === entry.id ? 'B' : null)}
+          diffEligible={isDiffEligible(entry)}
+          flash={entry.id === flashId}
+          oidInfoCache={historyOidCache}
+          mibTree={$mibStore.tree}
+          on:toggle={() => toggleExpand(entry.id)}
+          on:select={() => toggleSelect(entry.id)}
+          on:diff={() => toggleDiffSelection(entry)}
+          on:delete={() => handleDeleteEntry(entry.id)}
+        />
       {/each}
     {/if}
   </div>
+
+  {#if totalPages > 1}
+    <div class="history-pagination">
+      <button class="btn-page" on:click={() => currentPage = Math.max(1, currentPage - 1)} disabled={currentPage <= 1} title={$_('common.previous')} aria-label={$_('common.previous')}>
+        <Icon name="chevron-left" size={15} />
+      </button>
+      <span class="page-indicator">{currentPage} / {totalPages}</span>
+      <button class="btn-page" on:click={() => currentPage = Math.min(totalPages, currentPage + 1)} disabled={currentPage >= totalPages} title={$_('common.next')} aria-label={$_('common.next')}>
+        <Icon name="chevron-right" size={15} />
+      </button>
+    </div>
+  {/if}
 </div>
 
 {#if showDiffModal && diffSelectionA && diffSelectionB}
   <DiffModal entryA={diffSelectionA} entryB={diffSelectionB} on:close={() => showDiffModal = false} />
 {/if}
 
+{#if showClearConfirm}
+  <ConfirmDialog
+    title={$_('history.clearAll')}
+    text={$_('history.clearConfirm')}
+    confirmLabel={$_('history.clearAll')}
+    cancelLabel={$_('common.cancel')}
+    confirmIcon="trash-2"
+    danger
+    on:confirm={confirmClearHistory}
+    on:cancel={() => showClearConfirm = false}
+  />
+{/if}
+
 {#if showExportModal}
-  <div class="modal-overlay" on:click={() => showExportModal = false} on:keydown={(e) => e.key === 'Escape' && (showExportModal = false)} role="button" tabindex="-1">
-    <div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-      <h3>{$_('history.exportTitle')}</h3>
-      <textarea readonly>{exportData}</textarea>
-      <div class="modal-actions">
-        <button class="btn" on:click={handleCopyExport}>{$_('history.copyClipboard')}</button>
-        <button class="btn" on:click={handleDownloadExport}>{$_('history.downloadFile')}</button>
-        <button class="btn tertiary" on:click={() => showExportModal = false}>{$_('common.close')}</button>
-      </div>
-    </div>
-  </div>
+  <HistoryExportModal
+    {exportData}
+    bind:scope={exportScope}
+    bind:format={exportFormat}
+    selectedCount={selectedIds.size}
+    on:copy={handleCopyExport}
+    on:download={handleDownloadExport}
+    on:close={() => showExportModal = false}
+  />
 {/if}
 
 <style>
@@ -449,203 +632,47 @@
     border-radius: 4px;
   }
 
-  .no-history {
-    color: var(--text-muted);
-    text-align: center;
-    padding: 40px 20px;
-  }
-
-  .history-entry {
-    border-bottom: 1px solid var(--border-color);
-    background-color: var(--bg-lighter-color);
-  }
-
-  .history-entry:hover {
-    background-color: var(--hover-overlay);
-  }
-
-  .entry-header {
-    display: grid;
-    grid-template-columns: 20px 30px 60px 140px minmax(150px, 1fr) auto minmax(100px, 200px) 80px 80px 30px 30px;
-    align-items: center;
-    gap: 10px;
-    padding: 12px;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .chevron {
-    color: var(--text-muted);
-    font-size: 0.8em;
-  }
-
-  .operation-icon {
-    font-size: 1.2em;
-  }
-
-  .operation-type {
-    font-weight: 600;
-    color: var(--accent-color);
-  }
-
-  .timestamp {
-    font-size: 0.85em;
-    color: var(--text-dimmed);
-  }
-
-  .mib-name {
-    font-family: 'Courier New', monospace;
-    font-size: 0.85em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--oid-color);
-    font-weight: 500;
-  }
-
-  .value-display {
-    font-size: 0.85em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--accent-color);
-    font-weight: 600;
-    background-color: var(--favorites-subtle);
-    padding: 3px 8px;
-    border-radius: 3px;
-    border: 1px solid var(--favorites-border);
-  }
-
-  .targets-count, .duration {
-    font-size: 0.85em;
-    color: var(--text-dimmed);
-  }
-
-  .status {
-    font-weight: bold;
-    font-size: 1.2em;
-  }
-
-  .btn-icon {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 1em;
-    padding: 4px;
-    opacity: 0.6;
-    transition: opacity 0.2s;
-  }
-
-  .btn-icon:hover {
-    opacity: 1;
-  }
-
-  .entry-details {
-    padding: 15px;
-    background-color: var(--bg-color);
-    border-top: 1px solid var(--border-color);
-    font-size: 0.9em;
-  }
-
-  .detail-row {
-    margin-bottom: 8px;
-    display: flex;
-    gap: 10px;
-  }
-
-  .detail-row strong {
-    min-width: 120px;
-    color: var(--text-dimmed);
-  }
-
-  .detail-row code {
-    background-color: var(--bg-lighter-color);
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-family: 'Courier New', monospace;
-  }
-
-  .detail-row code.mib-name-detail {
-    color: var(--oid-color);
-    font-weight: 600;
-    background-color: var(--oid-subtle);
-  }
-
-  .error-row {
-    color: var(--error-color);
-  }
-
-  .results-summary {
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border-color);
-  }
-
-  .result-item {
-    margin-top: 8px;
-    padding: 8px;
-    background-color: var(--bg-lighter-color);
-    border-radius: 4px;
-    font-size: 0.85em;
-  }
-
-  .result-item.has-error {
-    border-left: 3px solid var(--error-color);
-  }
-
-  .error-text {
-    color: var(--error-color);
-    margin-top: 4px;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: var(--backdrop-color-strong);
+  .history-pagination {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background-color: var(--bg-light-color);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 20px;
-    min-width: 600px;
-    max-width: 80vw;
-    max-height: 80vh;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .modal h3 {
-    margin-top: 0;
-  }
-
-  .modal textarea {
-    flex: 1;
-    min-height: 300px;
-    margin: 15px 0;
+    gap: 12px;
     padding: 10px;
+    flex-shrink: 0;
+  }
+
+  .btn-page {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background-color: var(--bg-lighter-color);
     border: 1px solid var(--border-color);
     border-radius: 4px;
     color: var(--text-color);
-    font-family: 'Courier New', monospace;
-    font-size: 0.85em;
-    resize: vertical;
+    padding: 5px 9px;
+    cursor: pointer;
   }
 
-  .modal-actions {
-    display: flex;
-    gap: 10px;
-    justify-content: flex-end;
+  .btn-page:hover:not(:disabled) {
+    background-color: var(--hover-overlay);
+    border-color: var(--border-hover);
   }
+
+  .btn-page:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .page-indicator {
+    font-size: 0.9em;
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+    min-width: 52px;
+    text-align: center;
+  }
+
+  /* .empty-state is defined globally in shared.css */
+
 
   /* Diff mode styles */
   .active-diff {
@@ -654,28 +681,108 @@
     background-color: var(--accent-subtle-medium) !important;
   }
 
-  .diff-checkbox {
-    font-family: 'Courier New', monospace;
-    font-weight: 700;
-    font-size: 0.9em;
-    width: 24px;
-    height: 24px;
+  .diff-hint {
     display: flex;
     align-items: center;
-    justify-content: center;
-    border-radius: 3px;
-    background-color: var(--bg-color);
+    gap: 6px;
+    margin: 0 0 10px;
+    padding: 8px 12px;
+    font-size: 0.85em;
+    color: var(--accent-color);
+    background-color: var(--accent-subtle);
+    border: 1px solid var(--accent-border);
+    border-radius: 4px;
+  }
+
+  /* --- Sort bar --- */
+  .sort-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .sort-label {
+    font-size: 0.82em;
+    color: var(--text-muted);
+    margin-right: 2px;
+  }
+
+  .sort-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 9px;
+    font-size: 0.82em;
+    background-color: var(--bg-lighter-color);
     border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-light);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .sort-btn:hover {
+    background-color: var(--hover-overlay);
+    border-color: var(--border-hover);
+  }
+
+  .sort-btn.active {
+    color: var(--accent-color);
+    border-color: var(--accent-border);
+    background-color: var(--accent-subtle);
+    font-weight: 600;
+  }
+
+  /* --- Bulk action bar (select mode) --- */
+  .bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    background-color: var(--accent-subtle);
+    border: 1px solid var(--accent-border);
+    border-radius: 4px;
+  }
+
+  .bulk-count {
+    font-size: 0.88em;
+    font-weight: 600;
     color: var(--accent-color);
   }
 
-  .diff-checkbox.disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
+  .bulk-spacer {
+    flex: 1;
   }
 
-  .history-entry.diff-selected {
-    border-left: 3px solid var(--accent-color);
-    background-color: var(--accent-subtle-medium) !important;
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--accent-color);
+    cursor: pointer;
+    font-size: 0.85em;
+    padding: 2px 4px;
+    text-decoration: underline;
   }
+
+  .btn-link:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    text-decoration: none;
+  }
+
+  .bulk-bar .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .header-actions .btn.tertiary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
 </style>
