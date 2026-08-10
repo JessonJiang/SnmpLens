@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import Icon from '../Icon.svelte';
   import ContextMenu from '../ContextMenu.svelte';
+  import ResultsComparison from './ResultsComparison.svelte';
   import { copyToClipboard, copyRich } from '../utils/clipboard';
   import { escapeCSV, downloadFile } from '../utils/csv';
   import { formatValueWithEnum as _formatValueWithEnum, findTableParentNode } from '../utils/mibTree';
@@ -32,22 +33,23 @@
   let sortColumn = null;
   let sortAscending = true;
 
-  // Once the user manually picks Raw/Table, don't let auto-detection override it;
-  // the choice is reset only when a new result set arrives.
-  let userChoseView = false;
+  // The default view (raw/table) is decided exactly once per result set. This
+  // guard is what stops the view from flipping — and the filter input from
+  // losing focus — while the user is interacting with the results.
+  let autoViewApplied = false;
   let lastResultsForView = null;
+
+  // Raw WALK/GETBULK list sorting (clickable OID/Type/Value headers).
+  let rawSortKey = null; // 'oid' | 'type' | 'value'
+  let rawSortAsc = true;
 
   // Table cell context menu
   let cellMenu = { visible: false, x: 0, y: 0, items: [] };
   let cellMenuCtx = null;
   let comparisonViewEnabled = false;
   let compareEnabled = false;
-  let compareSortKey = 'oid'; // 'oid', 'delta', 'percent'
-  let compareSortAsc = true;
   let walkFilter = '';
 
-  // Reset filter when results change
-  $: if (bulkResults) walkFilter = '';
 
   /**
    * Filter WALK items by text or regex against OID, name, type, and value.
@@ -69,6 +71,73 @@
     });
   }
 
+  // Compare two OIDs numerically, segment by segment (so 1.2 < 1.10).
+  function compareOids(a, b) {
+    const pa = String(a).replace(/^\./, '').split('.').map(Number);
+    const pb = String(b).replace(/^\./, '').split('.').map(Number);
+    const n = Math.max(pa.length, pb.length);
+    for (let i = 0; i < n; i++) {
+      const x = pa[i] ?? -1;
+      const y = pb[i] ?? -1;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
+  // Sort raw WALK/GETBULK items by a column (kept out of buildTableData so it
+  // doesn't affect the reconstructed MIB-table view).
+  function sortWalkItems(items, key, asc) {
+    if (!key) return items;
+    const arr = [...items];
+    arr.sort((a, b) => {
+      let cmp;
+      if (key === 'oid') {
+        cmp = compareOids(a.oid, b.oid);
+      } else {
+        const av = key === 'type' ? a.type : a.value;
+        const bv = key === 'type' ? b.type : b.value;
+        const an = Number(av);
+        const bn = Number(bv);
+        cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av ?? '').localeCompare(String(bv ?? ''));
+      }
+      return asc ? cmp : -cmp;
+    });
+    return arr;
+  }
+
+  function sortRaw(key) {
+    if (rawSortKey === key) {
+      rawSortAsc = !rawSortAsc;
+    } else {
+      rawSortKey = key;
+      rawSortAsc = true;
+    }
+  }
+
+  // Filter reconstructed table ROWS: keep a row if the query matches its index or
+  // any cell's value / column name / OID (same query as the raw-view filter).
+  function filterTableRows(rows, columns, query) {
+    const q = (query || '').trim();
+    if (!q) return rows;
+    let test;
+    try {
+      const re = new RegExp(q, 'i');
+      test = (s) => re.test(s);
+    } catch {
+      const lower = q.toLowerCase();
+      test = (s) => String(s).toLowerCase().includes(lower);
+    }
+    return rows.filter(row => {
+      if (test(String(row.index))) return true;
+      for (const col of columns) {
+        const cell = row.cells[col.oid];
+        if (!cell) continue;
+        if (test(String(cell.value)) || test(col.name) || test(cell.fullOid || '')) return true;
+      }
+      return false;
+    });
+  }
+
   // Reactive: reset table view when operation changes away from WALK/GETBULK
   $: if (activeOperation !== 'WALK' && activeOperation !== 'GETBULK') {
     tableViewEnabled = false;
@@ -86,181 +155,6 @@
     return _formatValueWithEnum(value, oidInfoCache[oid], snmpType);
   }
 
-  // Build comparison data from multi-target WALK/GETBULK results (legacy)
-  function buildComparisonData(results) {
-    const targets = [];
-    const oidSet = new Set();
-    const targetData = {};
-
-    for (const res of results) {
-      if (res.error || !Array.isArray(res.result?.value)) continue;
-      targets.push(res.target);
-      targetData[res.target] = {};
-      for (const item of res.result.value) {
-        oidSet.add(item.oid);
-        targetData[res.target][item.oid] = item.value;
-      }
-    }
-
-    const oids = [...oidSet].sort();
-    return { targets, oids, targetData };
-  }
-
-  // Check if values differ across targets for a given OID
-  function valuesDiffer(oid, targets, targetData) {
-    const values = targets.map(t => targetData[t]?.[oid]);
-    const first = values[0];
-    return values.some(v => JSON.stringify(v) !== JSON.stringify(first));
-  }
-
-  // Export comparison table as CSV (legacy)
-  function exportComparisonCSV() {
-    const comp = buildComparisonData(bulkResults);
-    if (comp.oids.length === 0) return;
-    const lines = [];
-    lines.push(['OID', 'Name', ...comp.targets].map(escapeCSV).join(','));
-    for (const oid of comp.oids) {
-      const name = oidInfoCache[oid]?.name || '';
-      const values = comp.targets.map(t => {
-        const v = comp.targetData[t]?.[oid];
-        return v !== undefined ? formatValueWithEnum(v, oid) : '';
-      });
-      lines.push([oid, name, ...values].map(escapeCSV).join(','));
-    }
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    downloadFile(lines.join('\n'), `snmp-comparison-${timestamp}.csv`, 'text/csv');
-    notificationStore.add(get(_)('results.exportedComparison'), 'success');
-  }
-
-  // ============ ENHANCED COMPARISON VIEW ============
-
-  function buildEnhancedComparisonData(results, infoCache) {
-    const targets = [...new Set(results.filter(r => !r.error).map(r => r.target))];
-    if (targets.length < 2) return { targets: [], rows: [] };
-
-    // Build OID->target->value map
-    const oidMap = {};
-    for (const res of results) {
-      if (res.error) continue;
-      const items = res.result?.type === 'WalkResponse' || res.result?.type === 'GetBulkResponse'
-        ? (Array.isArray(res.result?.value) ? res.result.value : [])
-        : (res.result ? [res.result] : []);
-      for (const item of items) {
-        if (!oidMap[item.oid]) oidMap[item.oid] = {};
-        oidMap[item.oid][res.target] = {
-          value: typeof item.value === 'string' ? item.value : (item.value != null ? String(item.value) : ''),
-          type: item.type,
-          numValue: parseFloat(item.value)
-        };
-      }
-    }
-
-    // Build rows
-    const rows = Object.entries(oidMap).map(([oid, targetValues]) => {
-      const info = infoCache[oid];
-      const name = info?.name || '';
-      const values = {};
-      let isNumeric = true;
-      const numericValues = [];
-
-      for (const t of targets) {
-        const tv = targetValues[t];
-        values[t] = tv || null;
-        if (tv && !isNaN(tv.numValue)) {
-          numericValues.push(tv.numValue);
-        } else if (tv) {
-          isNumeric = false;
-        }
-      }
-
-      let delta = null;
-      let percentDiff = null;
-      let status = 'identical';
-
-      if (targets.length === 2) {
-        const vA = values[targets[0]];
-        const vB = values[targets[1]];
-        if (!vA || !vB) {
-          status = 'missing';
-        } else if (isNumeric && numericValues.length === 2) {
-          delta = Math.abs(numericValues[0] - numericValues[1]);
-          percentDiff = numericValues[0] !== 0
-            ? (delta / Math.abs(numericValues[0])) * 100
-            : (numericValues[1] !== 0 ? 100 : 0);
-          status = delta === 0 ? 'identical' : 'different';
-        } else {
-          status = vA.value === vB.value ? 'identical' : 'different';
-        }
-      } else {
-        // 3+ targets: check if all values are identical
-        const allValues = targets.map(t => values[t]?.value).filter(v => v != null);
-        const allSame = allValues.every(v => v === allValues[0]);
-        status = allValues.length < targets.length ? 'missing' : (allSame ? 'identical' : 'different');
-        if (isNumeric && numericValues.length >= 2) {
-          const min = Math.min(...numericValues);
-          const max = Math.max(...numericValues);
-          delta = max - min;
-          percentDiff = min !== 0 ? (delta / Math.abs(min)) * 100 : (max !== 0 ? 100 : 0);
-        }
-      }
-
-      return { oid, name, values, isNumeric, delta, percentDiff, status };
-    });
-
-    return { targets, rows };
-  }
-
-  $: comparisonData = compareEnabled ? buildEnhancedComparisonData(bulkResults, oidInfoCache) : { targets: [], rows: [] };
-
-  $: sortedComparisonRows = (() => {
-    if (!comparisonData.rows.length) return [];
-    const rows = [...comparisonData.rows];
-    rows.sort((a, b) => {
-      let cmp = 0;
-      if (compareSortKey === 'delta') {
-        cmp = (a.delta ?? -1) - (b.delta ?? -1);
-      } else if (compareSortKey === 'percent') {
-        cmp = (a.percentDiff ?? -1) - (b.percentDiff ?? -1);
-      } else {
-        cmp = a.oid.localeCompare(b.oid);
-      }
-      return compareSortAsc ? cmp : -cmp;
-    });
-    return rows;
-  })();
-
-  function toggleCompareSort(key) {
-    if (compareSortKey === key) {
-      compareSortAsc = !compareSortAsc;
-    } else {
-      compareSortKey = key;
-      compareSortAsc = true;
-    }
-  }
-
-  function exportEnhancedComparisonCSV() {
-    const { targets, rows } = comparisonData;
-    const escape = (s) => {
-      s = String(s ?? '');
-      if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
-      return s;
-    };
-    const header = ['OID', 'Name', ...targets, 'Delta', '% Diff', 'Status'].join(',');
-    const lines = [header, ...rows.map(r => [
-      escape(r.oid), escape(r.name),
-      ...targets.map(t => escape(r.values[t]?.value ?? '')),
-      r.delta != null ? r.delta.toFixed(2) : '',
-      r.percentDiff != null ? r.percentDiff.toFixed(1) + '%' : '',
-      r.status
-    ].join(','))];
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'comparison.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  }
 
   // Export results as CSV
   function exportAsCSV() {
@@ -534,18 +428,19 @@
   // Use detected table node as fallback for table view
   $: effectiveTableNode = (selectedNode && canShowTableView(selectedNode, bulkResults)) ? selectedNode : autoDetectedTableNode;
 
-  // Reset the manual view choice whenever a new result set arrives.
+  // New result set → reset the filter and re-arm the one-time view decision.
   $: if (bulkResults !== lastResultsForView) {
     lastResultsForView = bulkResults;
-    userChoseView = false;
+    walkFilter = '';
+    rawSortKey = null;
+    autoViewApplied = false;
   }
 
-  // Auto-pick the view once per result set (table when a Table/Row is detected),
-  // but never override a view the user chose manually.
-  $: if (!userChoseView && effectiveTableNode && (activeOperation === 'WALK' || activeOperation === 'GETBULK') && bulkResults.length > 0) {
-    if (effectiveTableNode.mibType === 'Table' || effectiveTableNode.mibType === 'Row') {
-      tableViewEnabled = true;
-    }
+  // Decide the default view exactly once (table when a Table/Row is detected,
+  // raw otherwise). Only once, so it never flips while the user interacts.
+  $: if (!autoViewApplied && bulkResults.length > 0 && (activeOperation === 'WALK' || activeOperation === 'GETBULK')) {
+    tableViewEnabled = !!(effectiveTableNode && (effectiveTableNode.mibType === 'Table' || effectiveTableNode.mibType === 'Row'));
+    autoViewApplied = true;
   }
 
   function handleColumnSort(colId) {
@@ -594,96 +489,15 @@
             <Icon name="copy" size={13} /> {$_('results.copyForWord')}
           </button>
         {/if}
-        {#if comparisonViewEnabled && canShowComparison}
-          <button class="btn-export" on:click={exportComparisonCSV} title={$_('results.compCsv')}>{$_('results.compCsv')}</button>
-        {/if}
-        {#if compareEnabled && comparisonData.rows.length > 0}
-          <button class="btn-export" on:click={exportEnhancedComparisonCSV} title={$_('results.exportComparison')}>{$_('results.exportComparison')}</button>
-        {/if}
       </div>
     </div>
 
-    {#if compareEnabled && comparisonData.rows.length > 0}
-      <div class="comparison-section">
-        <div class="comparison-header">
-          <h4>{$_('results.compareTitle')} ({comparisonData.rows.length} OIDs)</h4>
-          <button class="btn btn-small" on:click={exportEnhancedComparisonCSV}>{$_('results.exportComparison')}</button>
-        </div>
-        <div class="comparison-table-wrapper">
-          <table class="comparison-table">
-            <thead>
-              <tr>
-                <th class="sortable" on:click={() => toggleCompareSort('oid')}>
-                  OID {compareSortKey === 'oid' ? (compareSortAsc ? '▲' : '▼') : ''}
-                </th>
-                <th>Name</th>
-                {#each comparisonData.targets as target}
-                  <th class="target-col">{$anonMode ? anonymizeIp(target) : target}</th>
-                {/each}
-                <th class="sortable" on:click={() => toggleCompareSort('delta')}>
-                  {$_('results.delta')} {compareSortKey === 'delta' ? (compareSortAsc ? '▲' : '▼') : ''}
-                </th>
-                <th class="sortable" on:click={() => toggleCompareSort('percent')}>
-                  {$_('results.percentDiff')} {compareSortKey === 'percent' ? (compareSortAsc ? '▲' : '▼') : ''}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each sortedComparisonRows as row}
-                <tr class="compare-row {row.status}">
-                  <td class="oid-cell">{row.oid}</td>
-                  <td class="name-cell">{row.name}</td>
-                  {#each comparisonData.targets as target}
-                    <td class="value-cell" class:missing={!row.values[target]}>
-                      {row.values[target]?.value ?? '—'}
-                    </td>
-                  {/each}
-                  <td class="delta-cell">{row.delta != null ? row.delta.toFixed(2) : '—'}</td>
-                  <td class="percent-cell">{row.percentDiff != null ? row.percentDiff.toFixed(1) + '%' : '—'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </div>
+    {#if compareEnabled}
+      <ResultsComparison mode="enhanced" {bulkResults} {oidInfoCache} />
     {/if}
 
     {#if comparisonViewEnabled && canShowComparison}
-      {@const comp = buildComparisonData(bulkResults)}
-      <div class="comparison-view">
-        <div class="comparison-table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                <th>{$_('common.oid')}</th>
-                <th>{$_('common.name')}</th>
-                {#each comp.targets as target}
-                  <th class="target-col">{$anonMode ? anonymizeIp(target) : target}</th>
-                {/each}
-              </tr>
-            </thead>
-            <tbody>
-              {#each comp.oids as oid}
-                <tr class:diff-row={valuesDiffer(oid, comp.targets, comp.targetData)}>
-                  <td class="oid-cell" title={oid}>{oid}</td>
-                  <td class="name-cell">{oidInfoCache[oid]?.name || ''}</td>
-                  {#each comp.targets as target}
-                    {@const val = comp.targetData[target]?.[oid]}
-                    <td
-                      class="comp-value-cell"
-                      class:diff-cell={valuesDiffer(oid, comp.targets, comp.targetData) && val !== undefined}
-                      title={val !== undefined ? String(val) : 'N/A'}
-                    >
-                      {val !== undefined ? formatValueWithEnum(val, oid) : '-'}
-                    </td>
-                  {/each}
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        <p class="table-info">{$_('results.compInfo', { values: { oids: comp.oids.length, targets: comp.targets.length } })}</p>
-      </div>
+      <ResultsComparison mode="legacy" {bulkResults} {oidInfoCache} />
     {:else}
       {#each bulkResults as res}
         <div class="result" class:success={!res.error} class:error={res.error}>
@@ -697,22 +511,27 @@
             <p><strong>{$_('common.error')}:</strong> {res.error}</p>
           {:else if (res.result.type === 'WalkResponse' || res.result.type === 'GetBulkResponse') && Array.isArray(res.result.value)}
           <!-- WALK/GETBULK results display -->
-          <p><strong>{$_('results.baseOid')}</strong> {res.result.oid}</p>
-          <p><strong>{$_('results.resultsFound', { values: { count: res.result.value.length } })}</strong></p>
+          <div class="result-fields walk-summary">
+            <span class="rfield">
+              <span class="rlabel">{$_('results.baseOid')}</span>
+              <span class="rval mono">{res.result.oid}</span>
+            </span>
+            <span class="rfield rcount">{$_('results.resultsFound', { values: { count: res.result.value.length } })}</span>
+          </div>
 
           {#if canShowTableView(effectiveTableNode, bulkResults)}
             <div class="view-toggle">
               <button
                 class="btn-view"
                 class:active={!tableViewEnabled}
-                on:click={() => { tableViewEnabled = false; userChoseView = true; }}
+                on:click={() => { tableViewEnabled = false; }}
               >
                 {$_('results.rawView')}
               </button>
               <button
                 class="btn-view"
                 class:active={tableViewEnabled}
-                on:click={() => { tableViewEnabled = true; sortColumn = null; userChoseView = true; }}
+                on:click={() => { tableViewEnabled = true; sortColumn = null; }}
               >
                 {$_('results.tableView')}
               </button>
@@ -722,6 +541,19 @@
           {#if tableViewEnabled && canShowTableView(effectiveTableNode, bulkResults)}
             {@const colDefs = getTableColumnDefs(effectiveTableNode)}
             {@const tableData = buildTableData(res.result.value, colDefs, sortColumn, sortAscending)}
+            {@const tableRows = filterTableRows(tableData.rows, tableData.columns, walkFilter)}
+            <div class="walk-filter-bar">
+              <input
+                type="text"
+                class="walk-filter-input"
+                bind:value={walkFilter}
+                placeholder={$_('results.filterPlaceholder')}
+              />
+              {#if walkFilter.trim()}
+                <span class="walk-filter-count">{tableRows.length} / {tableData.rows.length}</span>
+                <button class="btn-copy-small" on:click={() => walkFilter = ''} title={$_('common.clear')}>&times;</button>
+              {/if}
+            </div>
             <div class="table-view-results">
               <table>
                 <thead>
@@ -747,7 +579,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {#each tableData.rows as row}
+                  {#each tableRows as row}
                     <tr>
                       <td class="index-cell">{row.index}</td>
                       {#each tableData.columns as col}
@@ -766,10 +598,10 @@
                 </tbody>
               </table>
             </div>
-            <p class="table-info">{$_('results.tableInfo', { values: { rows: tableData.rows.length, cols: tableData.columns.length } })}</p>
+            <p class="table-info">{$_('results.tableInfo', { values: { rows: tableRows.length, cols: tableData.columns.length } })}</p>
           {:else}
             <!-- Raw WALK results table -->
-            {@const filtered = filterWalkItems(res.result.value, walkFilter)}
+            {@const filtered = sortWalkItems(filterWalkItems(res.result.value, walkFilter), rawSortKey, rawSortAsc)}
             <div class="walk-filter-bar">
               <input
                 type="text"
@@ -786,9 +618,9 @@
               <table>
                 <thead>
                   <tr>
-                    <th>{$_('common.oid')}</th>
-                    <th>{$_('common.type')}</th>
-                    <th>{$_('common.value')}</th>
+                    <th class="sortable" on:click={() => sortRaw('oid')}>{$_('common.oid')} {rawSortKey === 'oid' ? (rawSortAsc ? '▲' : '▼') : ''}</th>
+                    <th class="sortable" on:click={() => sortRaw('type')}>{$_('common.type')} {rawSortKey === 'type' ? (rawSortAsc ? '▲' : '▼') : ''}</th>
+                    <th class="sortable" on:click={() => sortRaw('value')}>{$_('common.value')} {rawSortKey === 'value' ? (rawSortAsc ? '▲' : '▼') : ''}</th>
                     <th class="copy-col"></th>
                   </tr>
                 </thead>
@@ -806,7 +638,7 @@
                         {#if oidInfoCache[walkItem.oid]?.name}
                           <span class="oid-name">{oidInfoCache[walkItem.oid].name}</span>
                         {/if}
-                        {walkItem.oid}
+                        <span class="oid-raw">{walkItem.oid}</span>
                       </td>
                       <td>{walkItem.type}</td>
                       <td class="value-cell" title={JSON.stringify(walkItem.value)}>{formatValueWithEnum(walkItem.value, walkItem.oid, walkItem.type)}</td>
@@ -825,21 +657,22 @@
           {/if}
         {:else}
           <!-- GET/SET results display -->
-          <p class="result-line">
-            <strong>{$_('common.oid')}:</strong>
-            <span class="result-oid">{res.result.oid}</span>
-            <button class="btn-copy-small" on:click={() => copyToClipboard(res.result.oid, $_('common.oid'))} title={$_('common.copyOid')}><Icon name="copy" size={13} /></button>
-          </p>
-          <p><strong>{$_('common.type')}:</strong> {res.result.type}
-            {#if oidInfoCache[res.result.oid]?.name}
-              <span class="resolved-name">({oidInfoCache[res.result.oid].name})</span>
-            {/if}
-          </p>
-          <p class="result-line">
-            <strong>{$_('common.value')}:</strong>
-            <span class="result-value">{formatValueWithEnum(res.result.value, res.result.oid, res.result.type)}</span>
-            <button class="btn-copy-small" on:click={() => copyToClipboard(String(res.result.value), $_('common.value'))} title={$_('common.copyValue')}><Icon name="copy" size={13} /></button>
-          </p>
+          <div class="result-fields">
+            <span class="rfield">
+              <span class="rlabel">{$_('common.oid')}</span>
+              <span class="rval mono">{res.result.oid}</span>
+              <button class="btn-copy-small" on:click={() => copyToClipboard(res.result.oid, $_('common.oid'))} title={$_('common.copyOid')}><Icon name="copy" size={13} /></button>
+            </span>
+            <span class="rfield">
+              <span class="rlabel">{$_('common.type')}</span>
+              <span class="rval">{res.result.type}{#if oidInfoCache[res.result.oid]?.name} <span class="resolved-name">({oidInfoCache[res.result.oid].name})</span>{/if}</span>
+            </span>
+            <span class="rfield rfield-grow">
+              <span class="rlabel">{$_('common.value')}</span>
+              <span class="rval">{formatValueWithEnum(res.result.value, res.result.oid, res.result.type)}</span>
+              <button class="btn-copy-small" on:click={() => copyToClipboard(String(res.result.value), $_('common.value'))} title={$_('common.copyValue')}><Icon name="copy" size={13} /></button>
+            </span>
+          </div>
         {/if}
         </div>
       {/each}
@@ -862,6 +695,80 @@
   .result-target {
     font-weight: bold;
     margin-bottom: 8px;
+  }
+
+  /* Aligned, responsive result fields (GET/SET display + walk summary) */
+  .result-fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    row-gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .rfield {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    padding: 0 16px;
+    border-left: 1px solid var(--border-color);
+  }
+
+  .rfield:first-child {
+    padding-left: 0;
+    border-left: none;
+  }
+
+  .rfield-grow {
+    flex: 1 1 220px;
+  }
+
+  .rlabel {
+    color: var(--text-muted);
+    font-size: 0.78em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .rval {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .walk-summary .rcount {
+    color: var(--text-light);
+    font-weight: 600;
+  }
+
+  /* OID cell: MIB name and raw OID separated by a light divider */
+  .oid-name {
+    color: var(--oid-color);
+    font-weight: 600;
+    margin-right: 8px;
+    padding-right: 8px;
+    border-right: 1px solid var(--border-color);
+  }
+
+  .oid-raw {
+    color: var(--text-muted);
+  }
+
+  /* Light vertical separators between result-table columns */
+  .walk-results td,
+  .walk-results th,
+  .table-view-results td,
+  .table-view-results th {
+    border-right: 1px solid var(--border-color);
+  }
+
+  .walk-results td:last-child,
+  .walk-results th:last-child,
+  .table-view-results td:last-child,
+  .table-view-results th:last-child {
+    border-right: none;
   }
 
   .success {
@@ -931,6 +838,16 @@
     padding: 8px;
     border-bottom: 2px solid var(--border-color);
     font-weight: 600;
+  }
+
+  .walk-results th.sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .walk-results th.sortable:hover {
+    background-color: var(--hover-overlay);
   }
 
   .walk-results td {
@@ -1017,97 +934,12 @@
     opacity: 1;
   }
 
-  .result-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .result-oid, .result-value {
-    font-family: 'Courier New', monospace;
-  }
-
   .copy-col {
     width: 40px;
   }
 
   .copy-cell {
     text-align: center;
-  }
-
-  /* Comparison View */
-  .comparison-view {
-    margin-top: 10px;
-  }
-
-  .comparison-table-wrapper {
-    max-height: 500px;
-    overflow: auto;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-  }
-
-  .comparison-table-wrapper table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85em;
-  }
-
-  .comparison-table-wrapper thead {
-    position: sticky;
-    top: 0;
-    background-color: var(--bg-lighter-color);
-    z-index: 1;
-  }
-
-  .comparison-table-wrapper th {
-    text-align: left;
-    padding: 8px 10px;
-    border-bottom: 2px solid var(--border-color);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .comparison-table-wrapper td {
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border-color);
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .comparison-table-wrapper .oid-cell {
-    font-family: 'Courier New', monospace;
-    font-size: 0.85em;
-    color: var(--oid-color);
-    max-width: 250px;
-  }
-
-  .comparison-table-wrapper .name-cell {
-    color: var(--name-color);
-    font-size: 0.9em;
-    max-width: 150px;
-  }
-
-  .target-col {
-    color: var(--accent-color);
-  }
-
-  .diff-row {
-    background-color: var(--warning-subtle);
-  }
-
-  .diff-cell {
-    color: var(--warning-color);
-    font-weight: 600;
-  }
-
-  .comp-value-cell {
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Table View styles */
@@ -1251,110 +1083,4 @@
     background-color: var(--accent-subtle-medium);
   }
 
-  /* Enhanced Comparison View */
-  .comparison-section {
-    margin-top: 10px;
-  }
-
-  .comparison-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-
-  .comparison-header h4 {
-    margin: 0;
-    font-size: 0.95em;
-    color: var(--text-color);
-  }
-
-  .btn.btn-small {
-    padding: 4px 10px;
-    font-size: 0.8em;
-    background-color: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-dimmed);
-    border-radius: 3px;
-    cursor: pointer;
-    font-weight: 500;
-    transition: all 0.2s;
-  }
-
-  .btn.btn-small:hover {
-    border-color: var(--accent-color);
-    color: var(--accent-color);
-    background-color: var(--accent-subtle-medium);
-  }
-
-  .comparison-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85em;
-  }
-
-  .comparison-table th {
-    position: sticky;
-    top: 0;
-    background-color: var(--bg-lighter-color);
-    padding: 6px 10px;
-    text-align: left;
-    border-bottom: 2px solid var(--border-color);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .comparison-table th.sortable {
-    cursor: pointer;
-  }
-
-  .comparison-table th.sortable:hover {
-    color: var(--accent-color);
-  }
-
-  .comparison-table td {
-    padding: 5px 10px;
-    border-bottom: 1px solid var(--border-color);
-  }
-
-  .comparison-table .oid-cell {
-    font-family: 'Courier New', monospace;
-    color: var(--oid-color);
-    white-space: nowrap;
-  }
-
-  .comparison-table .name-cell {
-    color: var(--name-color);
-  }
-
-  .comparison-table .value-cell {
-    font-family: 'Courier New', monospace;
-  }
-
-  .comparison-table .value-cell.missing {
-    color: var(--text-muted);
-    font-style: italic;
-  }
-
-  .comparison-table .delta-cell,
-  .comparison-table .percent-cell {
-    font-family: 'Courier New', monospace;
-    text-align: right;
-  }
-
-  .compare-row.identical {
-    background-color: var(--success-subtle);
-  }
-
-  .compare-row.different {
-    background-color: var(--warning-subtle);
-  }
-
-  .compare-row.missing {
-    background-color: var(--hover-overlay);
-  }
-
-  .compare-row:hover {
-    background-color: var(--hover-overlay-medium);
-  }
 </style>
