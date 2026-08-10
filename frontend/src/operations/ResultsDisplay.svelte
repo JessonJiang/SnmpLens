@@ -32,6 +32,11 @@
   let sortColumn = null;
   let sortAscending = true;
 
+  // Once the user manually picks Raw/Table, don't let auto-detection override it;
+  // the choice is reset only when a new result set arrives.
+  let userChoseView = false;
+  let lastResultsForView = null;
+
   // Table cell context menu
   let cellMenu = { visible: false, x: 0, y: 0, items: [] };
   let cellMenuCtx = null;
@@ -529,8 +534,15 @@
   // Use detected table node as fallback for table view
   $: effectiveTableNode = (selectedNode && canShowTableView(selectedNode, bulkResults)) ? selectedNode : autoDetectedTableNode;
 
-  // Auto-enable table view when a Table/Row node is detected
-  $: if (effectiveTableNode && (activeOperation === 'WALK' || activeOperation === 'GETBULK') && bulkResults.length > 0) {
+  // Reset the manual view choice whenever a new result set arrives.
+  $: if (bulkResults !== lastResultsForView) {
+    lastResultsForView = bulkResults;
+    userChoseView = false;
+  }
+
+  // Auto-pick the view once per result set (table when a Table/Row is detected),
+  // but never override a view the user chose manually.
+  $: if (!userChoseView && effectiveTableNode && (activeOperation === 'WALK' || activeOperation === 'GETBULK') && bulkResults.length > 0) {
     if (effectiveTableNode.mibType === 'Table' || effectiveTableNode.mibType === 'Row') {
       tableViewEnabled = true;
     }
@@ -693,14 +705,14 @@
               <button
                 class="btn-view"
                 class:active={!tableViewEnabled}
-                on:click={() => tableViewEnabled = false}
+                on:click={() => { tableViewEnabled = false; userChoseView = true; }}
               >
                 {$_('results.rawView')}
               </button>
               <button
                 class="btn-view"
                 class:active={tableViewEnabled}
-                on:click={() => { tableViewEnabled = true; sortColumn = null; }}
+                on:click={() => { tableViewEnabled = true; sortColumn = null; userChoseView = true; }}
               >
                 {$_('results.tableView')}
               </button>
