@@ -47,9 +47,9 @@
   /**
    * Filter WALK items by text or regex against OID, name, type, and value.
    */
-  function filterWalkItems(items) {
-    if (!walkFilter.trim()) return items;
-    const query = walkFilter.trim();
+  function filterWalkItems(items, filterText) {
+    const query = (filterText || '').trim();
+    if (!query) return items;
     let test;
     try {
       const re = new RegExp(query, 'i');
@@ -757,7 +757,7 @@
             <p class="table-info">{$_('results.tableInfo', { values: { rows: tableData.rows.length, cols: tableData.columns.length } })}</p>
           {:else}
             <!-- Raw WALK results table -->
-            {@const filtered = filterWalkItems(res.result.value)}
+            {@const filtered = filterWalkItems(res.result.value, walkFilter)}
             <div class="walk-filter-bar">
               <input
                 type="text"
