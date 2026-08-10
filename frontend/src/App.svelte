@@ -22,10 +22,21 @@
   import { mibStore, mibDiagnostics } from './stores/mibStore';
   import { settingsStore } from './stores/settingsStore';
   import { pollingStore } from './stores/pollingStore';
+  import { historyStore } from './stores/historyStore';
   import { GetPersistentMibDirectory, ListMibFiles, ImportMibFiles } from '../wailsjs/go/main/App';
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime';
 
   let activeTab = 'operations'; // 'operations', 'traps', or 'history'
+  let historyHighlightId = null; // entry to highlight when opening the History tab
+
+  function goToHistory() {
+    activeTab = 'history';
+  }
+
+  function goToHistoryEntry(e) {
+    historyHighlightId = e.detail?.id ?? null;
+    activeTab = 'history';
+  }
 
   // Compute target count from settings
   $: targetCount = $settingsStore.targets
@@ -226,6 +237,10 @@
     OnFileDrop(handleFileDrop, true);
 
     mibPathsStore.load();
+
+    // Load persisted query history from SQLite (migrates any legacy
+    // localStorage history on first run).
+    historyStore.init();
 
     // Scan default MIB directory
     try {
@@ -473,9 +488,11 @@
       </div>
 
       {#if activeTab === 'operations'}
-        <OperationsPanel 
-          selectedNode={selectedNode} 
+        <OperationsPanel
+          selectedNode={selectedNode}
           pendingAction={pendingSnmpAction}
+          on:openHistory={goToHistory}
+          on:viewInHistory={goToHistoryEntry}
         />
       {/if}
 
@@ -484,7 +501,7 @@
       {/if}
 
       {#if activeTab === 'history'}
-        <HistoryPanel />
+        <HistoryPanel highlightId={historyHighlightId} on:highlightApplied={() => historyHighlightId = null} />
       {/if}
 
       {#if activeTab === 'monitor'}
@@ -772,7 +789,7 @@
     font-size: 0.75em;
     font-weight: 700;
     letter-spacing: 0.05em;
-    color: #fff;
+    color: var(--text-on-accent);
     background-color: var(--warning-color);
     border-radius: var(--radius-full);
     cursor: default;
