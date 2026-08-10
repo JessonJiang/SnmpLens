@@ -609,11 +609,7 @@
   tr.reachable { background-color: var(--success-subtle); }
   tr.unreachable { opacity: 0.5; }
 
-  .empty-state {
-    text-align: center;
-    padding: 40px 20px;
-    color: var(--text-muted);
-  }
+  /* .empty-state is defined globally in shared.css */
 
   .hint { font-size: 0.9em; font-style: italic; }
 </style>

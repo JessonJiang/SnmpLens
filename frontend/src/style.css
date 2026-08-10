@@ -40,6 +40,7 @@
   /* --- Accent --- */
   --accent-color: #007acc;
   --accent-hover-color: #0098ff;
+  --text-on-accent: #fff; /* text/icons on a filled accent background */
   --accent-subtle: rgba(0, 122, 204, 0.06);
   --accent-subtle-medium: rgba(0, 122, 204, 0.1);
   --accent-subtle-strong: rgba(0, 122, 204, 0.15);
@@ -138,6 +139,7 @@
   /* --- Accent --- */
   --accent-color: #0969da;
   --accent-hover-color: #0550ae;
+  --text-on-accent: #fff;
   --accent-subtle: rgba(9, 105, 218, 0.06);
   --accent-subtle-medium: rgba(9, 105, 218, 0.1);
   --accent-subtle-strong: rgba(9, 105, 218, 0.15);

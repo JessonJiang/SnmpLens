@@ -84,6 +84,14 @@
   border: 1px solid var(--border-color);
 }
 
+/* --- Empty / placeholder state --- */
+
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+
 /* --- Form --- */
 
 /* Form controls include their padding/border in width:100% so they never
@@ -166,6 +174,31 @@ svg.icon {
   to { transform: rotate(360deg); }
 }
 
+/* --- Operation type color codes (GET/SET/GETNEXT/GETBULK/WALK) --- */
+/* Set --op-color via an op-* class; it cascades to .op-badge and can drive
+   borders (e.g. border-left: 3px solid var(--op-color)). Use class op-{op}
+   with op = operation.toLowerCase(). */
+.op-get     { --op-color: #2563eb; }
+.op-getnext { --op-color: #0891b2; }
+.op-getbulk { --op-color: #7c3aed; }
+.op-walk    { --op-color: #16a34a; }
+.op-set     { --op-color: #d97706; }
+
+.op-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  color: var(--op-color, var(--accent-color));
+  background: color-mix(in srgb, var(--op-color, var(--accent-color)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--op-color, var(--accent-color)) 34%, transparent);
+}
+
 /* --- Mono --- */
 
 .mono {
@@ -178,9 +211,10 @@ svg.icon {
   border: none;
   cursor: pointer;
   font-size: 0.8em;
-  opacity: 0.4;
+  opacity: 0.55;
   padding: 2px 4px;
   border-radius: 3px;
+  color: var(--text-color);
   transition: opacity 0.15s;
 }
 
