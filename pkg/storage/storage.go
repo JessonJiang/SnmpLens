@@ -16,11 +16,12 @@ import (
 
 // Storage manages SQLite persistence for monitoring data.
 type Storage struct {
-	db          *sql.DB
-	mu          sync.Mutex
-	batch       []DataPoint
-	batchTicker *time.Ticker
-	done        chan struct{}
+	db           *sql.DB
+	mu           sync.Mutex
+	batch        []DataPoint
+	batchTicker  *time.Ticker
+	done         chan struct{}
+	historySaves int // counter to trim query_history only periodically
 }
 
 type Session struct {
@@ -120,6 +121,16 @@ func Init(dbPath string) (*Storage, error) {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_dp_session_ts ON data_points(session_id, timestamp);
+
+	CREATE TABLE IF NOT EXISTS query_history (
+		id         TEXT PRIMARY KEY,
+		timestamp  TEXT NOT NULL,
+		operation  TEXT NOT NULL,
+		success    INTEGER NOT NULL DEFAULT 0,
+		data       TEXT NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_qh_timestamp ON query_history(timestamp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -426,6 +437,169 @@ func (s *Storage) ImportLocalStorageData(sessions []Session, points map[string][
 	}
 
 	return tx.Commit()
+}
+
+// --- Query history persistence ---
+
+// maxHistoryEntries caps how many query-history rows are retained. SQLite
+// (unlike localStorage) has no small quota, so this is generous.
+const maxHistoryEntries = 2000
+
+// historyTrimInterval trims the table only once every N saves, so the common
+// per-operation write path stays a single INSERT (the cap is soft: the table
+// may briefly exceed maxHistoryEntries by up to this many rows).
+const historyTrimInterval = 128
+
+// trimHistory keeps only the newest maxHistoryEntries rows. Ordering by rowid
+// (SQLite's implicit insertion-order key, which has an index) reflects true
+// insertion order — independent of any missing/backdated timestamp — and lets
+// the DELETE use an index scan instead of a full-table sort.
+func (s *Storage) trimHistory() {
+	s.db.Exec(
+		`DELETE FROM query_history WHERE rowid NOT IN (
+			SELECT rowid FROM query_history ORDER BY rowid DESC LIMIT ?
+		)`,
+		maxHistoryEntries,
+	)
+}
+
+// SaveHistory inserts (or replaces) a single query-history entry. The full
+// entry is stored as JSON in the data column; id/timestamp/operation/success
+// are also extracted into their own columns for ordering and filtering.
+func (s *Storage) SaveHistory(entry map[string]interface{}) error {
+	id, _ := entry["id"].(string)
+	if id == "" {
+		return fmt.Errorf("history entry missing id")
+	}
+	ts, _ := entry["timestamp"].(string)
+	op, _ := entry["operation"].(string)
+	success := 0
+	if b, ok := entry["success"].(bool); ok && b {
+		success = 1
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal history entry: %w", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO query_history (id, timestamp, operation, success, data) VALUES (?, ?, ?, ?, ?)`,
+		id, ts, op, success, string(data),
+	); err != nil {
+		return fmt.Errorf("save history: %w", err)
+	}
+	// Trim only periodically to keep the hot write path a single INSERT.
+	s.mu.Lock()
+	s.historySaves++
+	shouldTrim := s.historySaves%historyTrimInterval == 0
+	s.mu.Unlock()
+	if shouldTrim {
+		s.trimHistory()
+	}
+	return nil
+}
+
+// LoadHistory returns all persisted history entries, newest first, decoded
+// from their JSON blobs.
+func (s *Storage) LoadHistory() ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(`SELECT data FROM query_history ORDER BY rowid DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := []map[string]interface{}{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			continue // skip corrupt rows rather than failing the whole load
+		}
+		entries = append(entries, m)
+	}
+	return entries, rows.Err()
+}
+
+// DeleteHistoryEntry removes a single history entry by id.
+func (s *Storage) DeleteHistoryEntry(id string) error {
+	_, err := s.db.Exec(`DELETE FROM query_history WHERE id = ?`, id)
+	return err
+}
+
+// DeleteHistoryEntries removes several history entries in one transaction.
+func (s *Storage) DeleteHistoryEntries(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`DELETE FROM query_history WHERE id = ?`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		stmt.Exec(id)
+	}
+	return tx.Commit()
+}
+
+// ClearHistory removes every history entry.
+func (s *Storage) ClearHistory() error {
+	_, err := s.db.Exec(`DELETE FROM query_history`)
+	return err
+}
+
+// CountHistory returns the number of persisted history entries.
+func (s *Storage) CountHistory() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM query_history`).Scan(&n)
+	return n, err
+}
+
+// ImportHistoryEntries bulk-inserts entries; used for the localStorage
+// migration and for JSON import from the UI.
+func (s *Storage) ImportHistoryEntries(entries []map[string]interface{}) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO query_history (id, timestamp, operation, success, data) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, entry := range entries {
+		id, _ := entry["id"].(string)
+		if id == "" {
+			continue
+		}
+		ts, _ := entry["timestamp"].(string)
+		op, _ := entry["operation"].(string)
+		success := 0
+		if b, ok := entry["success"].(bool); ok && b {
+			success = 1
+		}
+		data, err := json.Marshal(entry)
+		if err != nil {
+			continue
+		}
+		stmt.Exec(id, ts, op, success, string(data))
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.trimHistory()
+	return nil
 }
 
 func nullableString(b []byte) interface{} {

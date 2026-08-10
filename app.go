@@ -458,3 +458,62 @@ func (a *App) MonitorUpdateSession(sessionID string, active bool, stoppedAt stri
 	}
 	return a.storage.UpdateSession(sessionID, active, stoppedAt)
 }
+
+// --- Query History Persistence ---
+
+// SaveHistoryEntry persists a single query-history entry to SQLite.
+func (a *App) SaveHistoryEntry(entry map[string]interface{}) error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	return a.storage.SaveHistory(entry)
+}
+
+// LoadHistory returns all persisted query-history entries, newest first.
+func (a *App) LoadHistory() ([]map[string]interface{}, error) {
+	if a.storage == nil {
+		return []map[string]interface{}{}, nil
+	}
+	return a.storage.LoadHistory()
+}
+
+// DeleteHistoryEntry removes a single query-history entry by id.
+func (a *App) DeleteHistoryEntry(id string) error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	return a.storage.DeleteHistoryEntry(id)
+}
+
+// DeleteHistoryEntries removes several query-history entries at once.
+func (a *App) DeleteHistoryEntries(ids []string) error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	return a.storage.DeleteHistoryEntries(ids)
+}
+
+// ClearHistory removes every query-history entry.
+func (a *App) ClearHistory() error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	return a.storage.ClearHistory()
+}
+
+// CountHistory returns the number of persisted query-history entries.
+func (a *App) CountHistory() (int, error) {
+	if a.storage == nil {
+		return 0, nil
+	}
+	return a.storage.CountHistory()
+}
+
+// ImportHistoryEntries bulk-inserts query-history entries (localStorage
+// migration and JSON import from the UI).
+func (a *App) ImportHistoryEntries(entries []map[string]interface{}) error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	return a.storage.ImportHistoryEntries(entries)
+}
