@@ -11,6 +11,8 @@
   import Icon from './Icon.svelte';
   import SavedQueries from './operations/SavedQueries.svelte';
   import RecentHistory from './operations/RecentHistory.svelte';
+  import OperationTabs from './operations/OperationTabs.svelte';
+  import SetConfirmModal from './operations/SetConfirmModal.svelte';
   import { _ } from 'svelte-i18n';
   import { get } from 'svelte/store';
 
@@ -705,45 +707,7 @@
 
 <div class="panel">
   <!-- Operation Tabs -->
-  <div class="operation-tabs">
-    <button 
-      class="tab-btn" 
-      class:active={activeOperation === 'GET'}
-      on:click={() => activeOperation = 'GET'}
-    >
-      <Icon name="download" /> {$_('operations.get')}
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeOperation === 'SET'}
-      on:click={() => activeOperation = 'SET'}
-    >
-      <Icon name="upload" /> {$_('operations.set')}
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeOperation === 'GETNEXT'}
-      on:click={() => activeOperation = 'GETNEXT'}
-    >
-      <Icon name="arrow-right-to-line" /> {$_('operations.getNext')}
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeOperation === 'GETBULK'}
-      on:click={() => activeOperation = 'GETBULK'}
-      disabled={$settingsStore.snmpVersion === 'v1'}
-      title={$settingsStore.snmpVersion === 'v1' ? $_('operations.getBulkV1Warning') : ''}
-    >
-      <Icon name="layers" /> {$_('operations.getBulk')}
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeOperation === 'WALK'}
-      on:click={() => activeOperation = 'WALK'}
-    >
-      <Icon name="footprints" /> {$_('operations.walk')}
-    </button>
-  </div>
+  <OperationTabs bind:activeOperation snmpVersion={$settingsStore.snmpVersion} />
 
   <SavedQueries
     {activeOperation}
@@ -888,30 +852,16 @@
       </div>
 
       {#if showSetConfirm}
-        <div class="set-confirm-backdrop" on:mousedown={() => showSetConfirm = false}>
-          <div class="set-confirm-modal" on:mousedown|stopPropagation>
-            <h3><Icon name="triangle-alert" class="icon-warning" size={18} /> {$_('operations.setConfirm.title')}</h3>
-            <p class="set-confirm-warning">{$_('operations.setConfirm.message')}</p>
-            <dl class="set-confirm-details">
-              <dt>{$_('common.oid')}</dt>
-              <dd>{snmpSetOid}{selectedNode?.name ? ` (${selectedNode.name})` : ''}</dd>
-              <dt>{$_('common.value')}</dt>
-              <dd>{snmpSetValue}</dd>
-              <dt>{$_('common.type')}</dt>
-              <dd>{snmpSetType}</dd>
-              <dt>{$_('operations.setConfirm.targets')}</dt>
-              <dd>{getTargetsAsArray($settingsStore.targets).join(', ')}</dd>
-            </dl>
-            <label class="set-confirm-dontask">
-              <input type="checkbox" bind:checked={dontAskSetAgain} />
-              {$_('operations.setConfirm.dontAskAgain')}
-            </label>
-            <div class="set-confirm-actions">
-              <button class="btn" on:click={() => showSetConfirm = false}>{$_('common.cancel')}</button>
-              <button class="btn btn-primary" on:click={confirmSetAndExecute}><Icon name="upload" /> {$_('operations.setConfirm.confirm')}</button>
-            </div>
-          </div>
-        </div>
+        <SetConfirmModal
+          oid={snmpSetOid}
+          nodeName={selectedNode?.name || ''}
+          value={snmpSetValue}
+          type={snmpSetType}
+          targets={getTargetsAsArray($settingsStore.targets)}
+          bind:dontAsk={dontAskSetAgain}
+          on:confirm={confirmSetAndExecute}
+          on:cancel={() => showSetConfirm = false}
+        />
       {/if}
     {/if}
 
@@ -977,7 +927,7 @@
     on:walkResultClick={handleWalkResultClickEvent}
   />
 
-  <RecentHistory />
+  <RecentHistory on:openHistory on:viewInHistory />
 </div>
 
 <style>
@@ -1010,37 +960,6 @@
   }
 
   /* Operation Tabs */
-  .operation-tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 15px;
-    border-bottom: 2px solid var(--border-color);
-  }
-
-  .tab-btn {
-    flex: 1;
-    padding: 10px 16px;
-    background: transparent;
-    border: none;
-    border-bottom: 3px solid transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-weight: 500;
-    font-size: 0.95em;
-    transition: all 0.2s;
-  }
-
-  .tab-btn:hover {
-    background-color: var(--hover-overlay);
-    color: var(--text-color);
-  }
-
-  .tab-btn.active {
-    color: var(--accent-color);
-    border-bottom-color: var(--accent-color);
-    background-color: var(--accent-subtle-medium);
-  }
-
   /* Operation Form */
   .operation-form {
     background-color: var(--bg-lighter-color);
@@ -1288,54 +1207,5 @@
   .getbulk-params input[type="number"] {
     width: 80px;
   }
-
-  .tab-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  /* SET confirmation modal */
-  .set-confirm-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1100;
-  }
-  .set-confirm-modal {
-    background-color: var(--bg-light-color);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 20px;
-    width: min(480px, 90vw);
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-  }
-  .set-confirm-modal h3 { margin: 0 0 8px; font-size: 1.1em; }
-  .set-confirm-warning { margin: 0 0 14px; font-size: 0.88em; color: var(--text-muted); }
-  .set-confirm-details {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 6px 14px;
-    margin: 0 0 16px;
-    padding: 12px;
-    background-color: var(--bg-color);
-    border-radius: 6px;
-    font-size: 0.88em;
-  }
-  .set-confirm-details dt { color: var(--text-muted); font-weight: 600; }
-  .set-confirm-details dd { margin: 0; font-family: 'Courier New', monospace; word-break: break-all; }
-  .set-confirm-dontask {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 16px;
-    font-size: 0.85em;
-    color: var(--text-dimmed);
-    cursor: pointer;
-  }
-  .set-confirm-dontask input { width: auto; cursor: pointer; }
-  .set-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 </style>
