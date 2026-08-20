@@ -26,7 +26,12 @@
     v3SecLevel: overrides.v3?.secLevel ?? '',
     v3ContextName: overrides.v3?.contextName ?? '',
   };
-
+  $: {
+    if (local.v3SecLevel === "AuthNoPriv") {
+      local.v3PrivProto = "";
+      local.v3PrivPass = "";
+      }
+    }
   // Track which fields are overridden
   let enabled = {
     community: overrides.community !== undefined,
@@ -51,8 +56,12 @@
       if (local.v3User) v3.user = local.v3User;
       if (local.v3AuthProto) v3.authProto = local.v3AuthProto;
       if (local.v3AuthPass) v3.authPass = local.v3AuthPass;
-      if (local.v3PrivProto) v3.privProto = local.v3PrivProto;
-      if (local.v3PrivPass) v3.privPass = local.v3PrivPass;
+      // if (local.v3PrivProto) v3.privProto = local.v3PrivProto;
+      // if (local.v3PrivPass) v3.privPass = local.v3PrivPass;
+      if (local.v3SecLevel !== "AuthNoPriv") {
+        if (local.v3PrivProto) v3.privProto = local.v3PrivProto;
+        if (local.v3PrivPass) v3.privPass = local.v3PrivPass;
+      }
       if (local.v3SecLevel) v3.secLevel = local.v3SecLevel;
       if (local.v3ContextName) v3.contextName = local.v3ContextName;
       if (Object.keys(v3).length > 0) result.v3 = v3;
